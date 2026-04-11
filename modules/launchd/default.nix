@@ -43,27 +43,27 @@ let
       };
     };
 
-  # mutateConfig calls /bin/sh with /bin/wait4path to wait for /nix/store before
-  # running the original Program and ProgramArguments. This is intentional to
-  # fix the issue where launchd starts the agent before /nix/store is ready
-  # (before the Nix store is mounted.)
+  # mutateConfig writes a small wrapper script that waits for /nix/store before
+  # running the original Program and ProgramArguments. This avoids launchd
+  # starting the agent too early and lets macOS show a per-agent executable
+  # instead of a generic "sh" Login Item.
   mutateConfig =
     cnf:
     let
       args =
         lib.optional (cnf.Program != null) cnf.Program
         ++ lib.optionals (cnf.ProgramArguments != null) cnf.ProgramArguments;
+      launcher = pkgs.writeShellScript "${cnf.Label}-launcher" ''
+        /bin/wait4path /nix/store
+        exec ${lib.escapeShellArgs args}
+      '';
     in
     (removeAttrs cnf [
       "Program"
       "ProgramArguments"
     ])
     // {
-      ProgramArguments = [
-        "/bin/sh"
-        "-c"
-        "/bin/wait4path /nix/store && exec ${lib.escapeShellArgs args}"
-      ];
+      ProgramArguments = [ (toString launcher) ];
     };
 
   toAgent =
@@ -137,6 +137,14 @@ in
           ''
             # Disable errexit to ensure we process all agents even if some fail
             set +e
+
+            resolveLaunchdDomain() {
+              if /bin/launchctl print "gui/$UID" >/dev/null 2>&1; then
+                printf 'gui/%s' "$UID"
+              else
+                printf 'user/%s' "$UID"
+              fi
+            }
 
             # Stop an agent if it's running
             bootoutAgent() {
@@ -259,7 +267,7 @@ in
 
               newDir="$(readlink -m "$newGenPath/LaunchAgents")"
               dstDir=${lib.escapeShellArg dstDir}
-              domain="gui/$UID"
+              domain="$(resolveLaunchdDomain)"
 
               if [[ -n "''${oldGenPath:-}" ]]; then
                 oldDir="$(readlink -m "$oldGenPath/LaunchAgents")"
