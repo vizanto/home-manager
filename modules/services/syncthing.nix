@@ -804,7 +804,7 @@ in
         enable = mkOption {
           type = types.bool;
           default = false;
-          description = "Whether to enable a syncthing tray service.";
+          description = "Whether to enable a Syncthing tray or menu-bar service.";
         };
 
         command = mkOption {
@@ -816,7 +816,7 @@ in
         };
 
         package = lib.mkPackageOption pkgs "syncthingtray" {
-          default = "syncthingtray-minimal";
+          default = if pkgs.stdenv.isDarwin then "syncthing-macos" else "syncthingtray-minimal";
           example = "qsyncthingtray";
         };
       };
@@ -888,7 +888,7 @@ in
 
       launchd.agents = {
         syncthing = {
-          enable = true;
+          enable = !cfg.tray.enable;
           config = {
             ProgramArguments = [
               "${pkgs.writers.writeBash "syncthing-wrapper" ''
@@ -903,6 +903,26 @@ in
             ProcessType = "Background";
             StandardOutPath = "${config.home.homeDirectory}/Library/Logs/Syncthing/syncthing-stdout.log";
             StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/Syncthing/syncthing-stderr.log";
+          };
+        };
+
+        syncthing-tray = lib.mkIf cfg.tray.enable {
+          enable = true;
+          config = {
+            ProgramArguments = [
+              "${pkgs.writers.writeBash "syncthing-macos-wrapper" ''
+                ${copyKeys}
+                /usr/bin/defaults write com.github.xor-gate.syncthing-macosx StartAtLogin -bool false
+                /usr/bin/defaults write com.github.xor-gate.syncthing-macosx SUEnableAutomaticChecks -bool false
+                /usr/bin/defaults write com.github.xor-gate.syncthing-macosx URI ${lib.escapeShellArg "http://${cfg.guiAddress}"}
+                /usr/bin/defaults delete com.github.xor-gate.syncthing-macosx Executable >/dev/null 2>&1 || true
+                exec ${lib.escapeShellArg "${cfg.tray.package}/Applications/Syncthing.app/Contents/MacOS/Syncthing"}
+              ''}"
+            ];
+            ProcessType = "Interactive";
+            RunAtLoad = true;
+            StandardOutPath = "${config.home.homeDirectory}/Library/Logs/Syncthing/syncthing-tray-stdout.log";
+            StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/Syncthing/syncthing-tray-stderr.log";
           };
         };
 
@@ -921,12 +941,19 @@ in
 
     (lib.mkIf cfg.tray.enable {
       assertions = [
-        (lib.hm.assertions.assertPlatform "services.syncthing.tray" pkgs lib.platforms.linux)
+        {
+          assertion = pkgs.stdenv.isLinux || pkgs.stdenv.isDarwin;
+          message = "services.syncthing.tray is only supported on Linux and Darwin";
+        }
+        {
+          assertion = !pkgs.stdenv.isDarwin || !isUnixGui;
+          message = "services.syncthing.tray on Darwin requires a TCP guiAddress, not a Unix socket";
+        }
       ];
 
       home.packages = [ cfg.tray.package ];
 
-      systemd.user.services = {
+      systemd.user.services = lib.mkIf pkgs.stdenv.isLinux {
         ${cfg.tray.package.pname} = {
           Unit = {
             Description = cfg.tray.package.pname;
