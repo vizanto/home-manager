@@ -8,3 +8,6 @@
 // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
   ghostty-systemd-service = ./systemd-service.nix;
 }
+// lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+  ghostty-external-executable = ./external-executable.nix;
+}
