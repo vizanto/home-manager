@@ -6,7 +6,15 @@
 }:
 let
   cfg = config.programs.ghostty;
-  ghosttyPackageAvailable = (builtins.tryEval pkgs.ghostty).success;
+  ghosttyPackageAvailable =
+    let
+      available = builtins.tryEval (
+        builtins.deepSeq pkgs.ghostty.meta.platforms (
+          lib.meta.availableOn pkgs.stdenv.hostPlatform pkgs.ghostty
+        )
+      );
+    in
+    available.success && available.value;
   ghosttyExecutable = if cfg.package != null then lib.getExe cfg.package else cfg.executable;
 
   keyValueSettings = {
