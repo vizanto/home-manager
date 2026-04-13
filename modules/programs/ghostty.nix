@@ -6,6 +6,8 @@
 }:
 let
   cfg = config.programs.ghostty;
+  ghosttyPackageAvailable = (builtins.tryEval pkgs.ghostty).success;
+  ghosttyExecutable = if cfg.package != null then lib.getExe cfg.package else cfg.executable;
 
   keyValueSettings = {
     listsAsDuplicateKeys = true;
@@ -43,7 +45,22 @@ in
 
       package = lib.mkPackageOption pkgs "ghostty" {
         nullable = true;
-        extraDescription = "Set programs.ghostty.package to null on platforms where ghostty is not available or marked broken";
+        default = if ghosttyPackageAvailable then "ghostty" else null;
+        extraDescription = ''
+          Set this to `null` to manage Ghostty configuration without installing the
+          package, such as when using a non-Nix Ghostty build on platforms where
+          `pkgs.ghostty` is unavailable or marked broken.
+        '';
+      };
+
+      executable = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/Applications/Ghostty.app/Contents/MacOS/ghostty";
+        description = ''
+          Path to a Ghostty executable used to validate generated configuration when
+          {option}`programs.ghostty.package` is `null`.
+        '';
       };
 
       settings = lib.mkOption {
@@ -160,8 +177,8 @@ in
           let
             validate =
               file:
-              lib.mkIf (cfg.package != null)
-                "${lib.getExe cfg.package} +validate-config --config-file=${config.xdg.configHome}/ghostty/${file}";
+              lib.mkIf (ghosttyExecutable != null)
+                "${lib.escapeShellArg ghosttyExecutable} +validate-config --config-file=${lib.escapeShellArg "${config.xdg.configHome}/ghostty/${file}"}";
           in
           lib.mkMerge [
             {
