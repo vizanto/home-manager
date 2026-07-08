@@ -240,6 +240,23 @@ in
               fi
             }
 
+            userHasGuiSession() {
+              /usr/bin/pgrep -u "$UID" -x loginwindow >/dev/null 2>&1
+            }
+
+            domainIsAvailable() {
+              local domainName="$1"
+
+              case "$domainName" in
+                gui)
+                  userHasGuiSession
+                  ;;
+                user)
+                  return 0
+                  ;;
+              esac
+            }
+
             resolveDomain() {
               local domainName="$1"
 
@@ -251,6 +268,34 @@ in
                   printf 'user/%s\n' "$UID"
                   ;;
               esac
+            }
+
+            alternateDomainName() {
+              local domainName="$1"
+
+              case "$domainName" in
+                gui)
+                  printf 'user\n'
+                  ;;
+                user)
+                  printf 'gui\n'
+                  ;;
+              esac
+            }
+
+            bootoutDomainIfAvailable() {
+              local domainName="$1"
+              local agentName="$2"
+              local domain
+
+              domain="$(resolveDomain "$domainName")"
+              if domainIsAvailable "$domainName"; then
+                bootoutAgent "$domain" "$agentName"
+                return "$?"
+              fi
+
+              verboseEcho "Agent '$domain/$agentName' has no active GUI session; skipping bootout"
+              return 2
             }
 
             agentIsLoaded() {
@@ -361,19 +406,27 @@ in
               local newDomainName
               local oldDomain
               local newDomain
+              local staleDomainName
+              local newDomainAvailable
               local oldAgentBootedOut=0
 
               oldDomainName="$(readAgentDomain "$oldDomainsDir" "$agentName")"
               newDomainName="$(readAgentDomain "$newDomainsDir" "$agentName")"
               oldDomain="$(resolveDomain "$oldDomainName")"
               newDomain="$(resolveDomain "$newDomainName")"
+              staleDomainName="$(alternateDomainName "$newDomainName")"
+              domainIsAvailable "$newDomainName"
+              newDomainAvailable=$?
               if [[ -n "$oldDir" ]]; then
                 oldSrcPath="$oldDir/$agentFile"
               fi
 
               # Skip if unchanged
               if cmp -s "$srcPath" "$dstPath" && [[ "$oldDomainName" == "$newDomainName" ]]; then
-                if agentIsLoaded "$newDomain" "$agentName"; then
+                if [[ "$newDomainAvailable" -ne 0 ]]; then
+                  verboseEcho "Agent '$newDomain/$agentName' is up-to-date but no GUI session is active; skipping bootstrap"
+                  return 0
+                elif agentIsLoaded "$newDomain" "$agentName"; then
                   verboseEcho "Agent '$newDomain/$agentName' is already up-to-date"
                   return 0
                 else
@@ -385,7 +438,7 @@ in
 
               # Stop/Unload agent if it's already running
               if [[ -f "$dstPath" ]]; then
-                bootoutAgent "$oldDomain" "$agentName"
+                bootoutDomainIfAvailable "$oldDomainName" "$agentName"
                 case "$?" in
                   0)
                     oldAgentBootedOut=1
@@ -399,7 +452,21 @@ in
               fi
 
               if [[ "$oldDomainName" != "$newDomainName" ]]; then
-                bootoutAgent "$newDomain" "$agentName"
+                bootoutDomainIfAvailable "$newDomainName" "$agentName"
+                case "$?" in
+                  0|2)
+                    ;;
+                  *)
+                    if [[ "$oldAgentBootedOut" -eq 1 ]]; then
+                      restoreAgent "$oldSrcPath" "$dstPath" "$oldDomain" "$agentName"
+                    fi
+                    return 1
+                    ;;
+                esac
+              fi
+
+              if [[ "$staleDomainName" != "$oldDomainName" && "$staleDomainName" != "$newDomainName" ]]; then
+                bootoutDomainIfAvailable "$staleDomainName" "$agentName"
                 case "$?" in
                   0|2)
                     ;;
@@ -417,6 +484,11 @@ in
                   restoreAgent "$oldSrcPath" "$dstPath" "$oldDomain" "$agentName"
                 fi
                 return 1
+              fi
+
+              if [[ "$newDomainAvailable" -ne 0 ]]; then
+                verboseEcho "Installed agent '$newDomain/$agentName' but no GUI session is active; it will load at next login"
+                return 0
               fi
 
               if bootstrapAgent "$newDomain" "$dstPath" "$agentName"; then
@@ -441,9 +513,11 @@ in
               local dstPath="$dstDir/$agentFile"
               local domainName
               local domain
+              local staleDomainName
 
               domainName="$(readAgentDomain "$oldDomainsDir" "$agentName")"
               domain="$(resolveDomain "$domainName")"
+              staleDomainName="$(alternateDomainName "$domainName")"
 
               if [[ -e "$newDir/$agentFile" ]]; then
                 verboseEcho "Agent '$agentName' still exists in new generation, skipping cleanup"
@@ -461,7 +535,7 @@ in
               fi
 
               # Stop and remove the agent
-              bootoutAgent "$domain" "$agentName"
+              bootoutDomainIfAvailable "$domainName" "$agentName"
               case "$?" in
                 0|2)
                   ;;
@@ -469,6 +543,17 @@ in
                   return 1
                   ;;
               esac
+
+              if [[ "$staleDomainName" != "$domainName" ]]; then
+                bootoutDomainIfAvailable "$staleDomainName" "$agentName"
+                case "$?" in
+                  0|2)
+                    ;;
+                  *)
+                    return 1
+                    ;;
+                esac
+              fi
 
               verboseEcho "Removing agent file '$dstPath'"
               if run rm -f $VERBOSE_ARG "$dstPath"; then
