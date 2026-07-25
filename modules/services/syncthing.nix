@@ -946,12 +946,7 @@ in
           enable = !cfg.tray.enable;
           domain = lib.mkDefault "user";
           config = {
-            ProgramArguments = [
-              "${pkgs.writers.writeBash "syncthing-wrapper" ''
-                ${copyKeys}    # simulate systemd's `syncthing-init.Service.ExecStartPre`
-                exec ${lib.escapeShellArgs syncthingArgs}
-              ''}"
-            ];
+            ProgramArguments = syncthingArgs;
             KeepAlive = {
               Crashed = true;
               SuccessfulExit = false;
@@ -966,14 +961,7 @@ in
           enable = true;
           config = {
             ProgramArguments = [
-              "${pkgs.writers.writeBash "syncthing-macos-wrapper" ''
-                ${copyKeys}
-                /usr/bin/defaults write com.github.xor-gate.syncthing-macosx StartAtLogin -bool false
-                /usr/bin/defaults write com.github.xor-gate.syncthing-macosx SUEnableAutomaticChecks -bool false
-                /usr/bin/defaults write com.github.xor-gate.syncthing-macosx URI ${lib.escapeShellArg "http://${cfg.guiAddress}"}
-                /usr/bin/defaults delete com.github.xor-gate.syncthing-macosx Executable >/dev/null 2>&1 || true
-                exec ${lib.escapeShellArg "${cfg.tray.package}/Applications/Syncthing.app/Contents/MacOS/Syncthing"}
-              ''}"
+              "${cfg.tray.package}/Applications/Syncthing.app/Contents/MacOS/Syncthing"
             ];
             ProcessType = "Interactive";
             RunAtLoad = true;
@@ -993,6 +981,29 @@ in
           };
         };
       };
+
+      # Previously the darwin agents ran through a generated shell wrapper that
+      # seeded this state before exec'ing the real binary. That made the shell
+      # interpreter the program launchd spawns, so every agent showed up as one
+      # shared, indistinguishable "bash" in Login Items and in the privacy
+      # panes -- and a grant given to it applied to every other agent too.
+      # Seeding during activation instead lets each agent register its actual
+      # program, so macOS can attribute and authorise Syncthing by name.
+      home.activation.setupSyncthing =
+        let
+          trayDefaults = lib.optionalString cfg.tray.enable ''
+            run /usr/bin/defaults write com.github.xor-gate.syncthing-macosx StartAtLogin -bool false
+            run /usr/bin/defaults write com.github.xor-gate.syncthing-macosx SUEnableAutomaticChecks -bool false
+            run /usr/bin/defaults write com.github.xor-gate.syncthing-macosx URI ${lib.escapeShellArg "http://${cfg.guiAddress}"}
+            run /usr/bin/defaults delete com.github.xor-gate.syncthing-macosx Executable >/dev/null 2>&1 || true
+          '';
+        in
+        lib.mkIf pkgs.stdenv.isDarwin (
+          lib.hm.dag.entryBetween [ "setupLaunchAgents" ] [ "writeBoundary" ] ''
+            run ${copyKeys}
+            ${trayDefaults}
+          ''
+        );
     })
 
     (lib.mkIf cfg.tray.enable {
