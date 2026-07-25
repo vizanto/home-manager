@@ -30,7 +30,9 @@
       assertFileContains $serviceFile '<false/>'
       assertFileContains $serviceFile '<string>org.nix-community.home.test-service</string>'
       assertFileContains $serviceFile '<string>Background</string>'
-      assertFileRegex $serviceFile '<string>/nix/store/.*-org\.nix-community\.home\.test-service-launcher</string>'
+      # The agent is registered as a per-program trampoline, not a shared shell
+      # interpreter, so macOS attributes it to the actual program.
+      assertFileRegex $serviceFile '<string>/nix/store/.*-command/bin/command</string>'
       assertFileContains $serviceFile '<key>UnrecognizedByHomeManager</key>'
       assertFileContains $serviceFile '<string>should make it to the resulting plist</string>'
 

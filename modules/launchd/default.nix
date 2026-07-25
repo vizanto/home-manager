@@ -39,17 +39,18 @@ let
           default = true;
           example = false;
           description = ''
-            Whether to start the agent through a `/bin/sh` wrapper that waits
-            for the Nix store to be mounted before running the agent's
-            command. This guards against launchd starting the agent before
-            the Nix store volume is available, for example early during login
-            when the store volume is encrypted.
+            Whether to start the agent through a small per-agent trampoline
+            that waits for the Nix store to be mounted before running the
+            agent's command. This guards against launchd starting the agent
+            before the Nix store volume is available, for example early
+            during login when the store volume is encrypted.
 
-            When disabled, the agent's command is run through a launcher
-            script named after the agent instead. This makes the agent appear
-            under its own name, rather than as "sh", in System Settings >
-            Login Items & Extensions, but the agent will fail to start if
-            launchd runs it before the Nix store is mounted.
+            Either way the command runs through a trampoline named after the
+            target program, so macOS identifies the agent by its real
+            executable -- rather than as "sh" -- in System Settings > Login
+            Items & Extensions and in the privacy panes. When disabled, the
+            agent starts immediately and will fail if launchd runs it before
+            the Nix store is mounted.
           '';
         };
         config = lib.mkOption {
@@ -83,41 +84,96 @@ let
       ];
     };
 
-  # mutateConfig replaces the original Program and ProgramArguments. By
-  # default it calls /bin/sh with /bin/wait4path to wait for /nix/store
-  # before running the original command. This is intentional to fix the
-  # issue where launchd starts the agent before /nix/store is ready (before
-  # the Nix store is mounted.) When waitForNixStore is disabled, the command
-  # is run through a launcher script named after the agent instead, so that
-  # the agent is displayed under its own name (rather than "sh") in System
-  # Settings > Login Items & Extensions.
+  # macOS identifies a launchd job by the executable that launchd spawns. When
+  # that executable is a shell script, the identity becomes the *interpreter*,
+  # so every agent collapses into a single indistinguishable "bash" entry in
+  # Login Items and in the privacy panes ("Files & Folders", "Full Disk
+  # Access"). Worse, a permission granted to that entry is silently shared with
+  # every other agent, and with any other script run through the same shell.
+  #
+  # Compile a tiny per-agent trampoline named after the target program instead.
+  # When waitForNixStore is set it also waits for /nix/store -- commonly a
+  # separate APFS volume mounted after early boot -- and then execs the real
+  # program, so launchd starts the agent no earlier than before while macOS
+  # shows and authorises the actual application.
+  launcherName =
+    exePath:
+    let
+      base = baseNameOf exePath;
+      # Store paths are "<hash>-<name>"; the hash is noise in the privacy panes.
+      unhashed =
+        let
+          m = lib.match "[0-9a-z]{32}-(.+)" base;
+        in
+        if m != null then lib.head m else base;
+      cleaned = lib.stringAsChars (c: if lib.match "[A-Za-z0-9._+-]" c != null then c else "-") unhashed;
+      trimmed = lib.removePrefix "." cleaned;
+    in
+    if trimmed == "" then "launcher" else trimmed;
+
+  # launchd treats Program as the executable and ProgramArguments as the full
+  # argv; either may stand in for the other when only one is given.
+  launcherPath =
+    waitForNixStore: cnf:
+    let
+      exePath = if cnf.Program != null then cnf.Program else lib.head cnf.ProgramArguments;
+      argv = if cnf.ProgramArguments != null then cnf.ProgramArguments else [ cnf.Program ];
+      cString = s: builtins.toJSON (toString s);
+      name = launcherName exePath;
+      drv =
+        pkgs.runCommandCC name
+          {
+            source = ''
+              #include <sys/stat.h>
+              #include <time.h>
+              #include <unistd.h>
+
+              int main(void) {
+                static char *const argv[] = {
+              ${lib.concatMapStringsSep "\n" (a: "    ${cString a},") argv}
+                  0
+                };
+              ${lib.optionalString waitForNixStore ''
+                static const struct timespec delay = { 0, 100000000L };
+                struct stat st;
+
+                while (stat("/nix/store", &st) != 0)
+                  nanosleep(&delay, 0);
+
+              ''}
+                execv(${cString exePath}, argv);
+                return 127;
+              }
+            '';
+            # The argv is compiled into the trampoline, so record it here too:
+            # the plist no longer shows the command line that launchd ends up
+            # running, and this keeps it inspectable without running the agent.
+            command = lib.escapeShellArgs argv + "\n";
+            passAsFile = [
+              "source"
+              "command"
+            ];
+          }
+          ''
+            mkdir -p "$out/bin"
+            $CC -O2 -x c "$sourcePath" -o "$out/bin/${name}"
+            cp "$commandPath" "$out/command"
+          '';
+    in
+    "${drv}/bin/${name}";
+
   mutateConfig =
     name: waitForNixStore: cnf:
-    let
-      args =
-        lib.optional (cnf.Program != null) cnf.Program
-        ++ lib.optionals (cnf.ProgramArguments != null) cnf.ProgramArguments;
-      launcherName = lib.strings.sanitizeDerivationName name;
-      launcher = pkgs.writeScriptBin launcherName ''
-        #!/bin/sh
-        exec ${lib.escapeShellArgs args}
-      '';
-    in
-    (removeAttrs cnf [
-      "Program"
-      "ProgramArguments"
-    ])
-    // {
-      ProgramArguments =
-        if waitForNixStore then
-          [
-            "/bin/sh"
-            "-c"
-            "/bin/wait4path /nix/store && exec ${lib.escapeShellArgs args}"
-          ]
-        else
-          [ "${launcher}/bin/${launcherName}" ];
-    };
+    if cnf.Program == null && cnf.ProgramArguments == null then
+      cnf
+    else
+      (removeAttrs cnf [
+        "Program"
+        "ProgramArguments"
+      ])
+      // {
+        ProgramArguments = [ (launcherPath waitForNixStore cnf) ];
+      };
 
   toAgent =
     name: v:
