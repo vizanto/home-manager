@@ -871,7 +871,7 @@ in
         };
 
         package = lib.mkPackageOption pkgs "syncthingtray" {
-          default = if pkgs.stdenv.isDarwin then "syncthing-macos" else "syncthingtray-minimal";
+          default = if pkgs.stdenv.hostPlatform.isDarwin then "syncthing-macos" else "syncthingtray-minimal";
           example = "qsyncthingtray";
         };
       };
@@ -998,7 +998,7 @@ in
             run /usr/bin/defaults delete com.github.xor-gate.syncthing-macosx Executable >/dev/null 2>&1 || true
           '';
         in
-        lib.mkIf pkgs.stdenv.isDarwin (
+        lib.mkIf pkgs.stdenv.hostPlatform.isDarwin (
           lib.hm.dag.entryBetween [ "setupLaunchAgents" ] [ "writeBoundary" ] ''
             run ${copyKeys}
             ${trayDefaults}
@@ -1009,18 +1009,18 @@ in
     (lib.mkIf cfg.tray.enable {
       assertions = [
         {
-          assertion = pkgs.stdenv.isLinux || pkgs.stdenv.isDarwin;
+          assertion = pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin;
           message = "services.syncthing.tray is only supported on Linux and Darwin";
         }
         {
-          assertion = !pkgs.stdenv.isDarwin || !isUnixGui;
+          assertion = !pkgs.stdenv.hostPlatform.isDarwin || !isUnixGui;
           message = "services.syncthing.tray on Darwin requires a TCP guiAddress, not a Unix socket";
         }
       ];
 
       home.packages = [ cfg.tray.package ];
 
-      systemd.user.services = lib.mkIf pkgs.stdenv.isLinux {
+      systemd.user.services = lib.mkIf pkgs.stdenv.hostPlatform.isLinux {
         ${cfg.tray.package.pname} = {
           Unit = {
             Description = cfg.tray.package.pname;
