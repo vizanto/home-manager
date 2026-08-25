@@ -178,6 +178,12 @@ let
                 gitHubDeclaration "nix-community" "home-manager" (
                   lib.removePrefix "/" (lib.removePrefix hmPath (toString decl))
                 )
+              else if lib.hasPrefix "/nix/store/" (toString decl) then
+                # Raw store-path declarations (nixpkgs, host flakes, ...)
+                # leak an uncontexted store reference into options.json,
+                # which trips Nix's context check at derivation creation.
+                # Link to the source repo instead of embedding the path.
+                gitHubDeclaration "NixOS" "nixpkgs" "nixos/modules"
               else if decl == "lib/modules.nix" then
                 # TODO: handle this in a better way (may require upstream
                 # changes to nixpkgs)
